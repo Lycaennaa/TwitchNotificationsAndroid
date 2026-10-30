@@ -3,6 +3,7 @@ package com.lycaennaa.twitchalerts
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
+import java.io.IOException
 
 class TwitchApiClientTest {
     @Test
@@ -13,6 +14,18 @@ class TwitchApiClientTest {
     @Test
     fun leavesBareAccessTokenUnchangedExceptForWhitespace() {
         assertEquals("token-value", TwitchApiClient.normalizeToken(" token-value "))
+    }
+
+    @Test
+    fun includesUnderlyingNetworkFailureInStatus() {
+        assertEquals(
+            "Could not reach Twitch: DNS lookup failed.",
+            TwitchApiClient.networkFailureMessage(IOException("DNS lookup failed")),
+        )
+        assertEquals(
+            "Could not reach Twitch: IOException.",
+            TwitchApiClient.networkFailureMessage(IOException()),
+        )
     }
 
     @Test

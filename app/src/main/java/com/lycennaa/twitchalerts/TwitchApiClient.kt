@@ -182,7 +182,7 @@ internal class TwitchApiClient {
         } catch (exception: IOException) {
             throw TwitchApiException(
                 TwitchApiException.Kind.NETWORK,
-                "Could not reach Twitch.",
+                networkFailureMessage(exception),
                 exception,
             )
         }
@@ -210,7 +210,7 @@ internal class TwitchApiClient {
         } catch (exception: IOException) {
             throw TwitchApiException(
                 TwitchApiException.Kind.NETWORK,
-                "Could not reach Twitch.",
+                networkFailureMessage(exception),
                 exception,
             )
         } finally {
@@ -272,6 +272,14 @@ internal class TwitchApiClient {
             } else {
                 token
             }
+        }
+
+        fun networkFailureMessage(exception: IOException): String {
+            val detail = exception.message
+                ?.takeIf(String::isNotBlank)
+                ?.take(160)
+                ?: exception.javaClass.simpleName
+            return "Could not reach Twitch: $detail."
         }
     }
 }

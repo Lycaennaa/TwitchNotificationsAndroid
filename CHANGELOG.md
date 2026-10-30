@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Show underlying connection errors when Twitch cannot be reached.
 - Add delayed WorkManager checks and an app-resume reminder after Android stops foreground monitoring.
 - Target API 34 for sideloading to avoid Android 15's API 35+ `dataSync` timeout.
 - Add an opt-in reboot toggle that resumes previously requested monitoring after `BOOT_COMPLETED`.
