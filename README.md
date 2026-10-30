@@ -11,6 +11,8 @@ A small Kotlin Android app for Twitch followed-channel go-live alerts. It uses a
 
 Go-live events post a native Android notification whether the app is open or in the background; when the app is open, they also show a Toast. Streams already live on the first successful poll are treated as the initial baseline and do not trigger alerts.
 
+Go-live notifications use Android's high-importance channel and attach the streamer's Twitch profile image when available. Heads-up and lock-screen presentation remain subject to Android and user settings; these one-way alerts are not Android conversation or bubble notifications.
+
 ## Background behavior
 
 Monitoring uses a user-started foreground service so it can continue polling after the activity is closed. It waits about 60 seconds after each completed poll; network time and Android scheduling mean this is best-effort, not an exact one-minute guarantee. The ongoing notification is required. Enable **Start monitoring after device restart** to attempt resuming after a normal reboot, but only if monitoring was still requested. A force-stop or device restrictions may prevent automatic start; open the app to start again.

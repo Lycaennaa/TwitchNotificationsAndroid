@@ -8,7 +8,9 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.os.Build
+import java.util.concurrent.Executors
 
 internal object TwitchNotifications {
     const val MONITORING_CHANNEL_ID = "twitch_monitoring"
@@ -16,6 +18,11 @@ internal object TwitchNotifications {
     const val MONITORING_NOTIFICATION_ID = 4100
     private const val TEST_NOTIFICATION_ID = 4101
     const val RESUME_REMINDER_NOTIFICATION_ID = 4102
+    private const val LIVE_STREAM_NOTIFICATION_ID = 5_000
+
+    private val avatarExecutor = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "twitch-notification-avatar").apply { isDaemon = true }
+    }
 
     fun createChannels(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -69,7 +76,11 @@ internal object TwitchNotifications {
             .build()
     }
 
-    fun liveStream(context: Context, stream: TwitchStream): Notification {
+    fun liveStream(
+        context: Context,
+        stream: TwitchStream,
+        largeIcon: Bitmap? = null,
+    ): Notification {
         val builder = Notification.Builder(context, LIVE_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_twitch_notification)
             .setContentTitle("${stream.displayName} is live")
@@ -77,15 +88,35 @@ internal object TwitchNotifications {
             .setContentIntent(openAppIntent(context))
             .setAutoCancel(true)
             .setCategory(Notification.CATEGORY_SOCIAL)
+        if (largeIcon != null) builder.setLargeIcon(largeIcon)
         if (stream.gameName.isNotBlank()) builder.setSubText(stream.gameName)
         return builder.build()
     }
 
-    fun postLiveStream(context: Context, stream: TwitchStream) {
-        val notificationId = 5_000 + (stream.id.hashCode() and 0x7fff_ffff) % 1_000_000
-        context.getSystemService(NotificationManager::class.java)
-            .notify(notificationId, liveStream(context, stream))
+    fun postLiveStreams(context: Context, streams: List<TwitchStream>, session: TwitchSession) {
+        if (streams.isEmpty()) return
+        val applicationContext = context.applicationContext
+        val manager = applicationContext.getSystemService(NotificationManager::class.java)
+        for (stream in streams) {
+            manager.notify(stream.id, LIVE_STREAM_NOTIFICATION_ID, liveStream(applicationContext, stream))
+        }
+
+        avatarExecutor.execute {
+            val profileImagesByUserId = try {
+                TwitchApiClient().profileImageUrls(session, streams.map { it.userId })
+            } catch (_: TwitchApiException) {
+                return@execute
+            }
+            val streamsWithProfileImages = attachProfileImages(streams, profileImagesByUserId)
+            for (stream in streamsWithProfileImages) {
+                val avatar = TwitchAvatarLoader.load(stream.profileImageUrl) ?: continue
+                val notificationId = LIVE_STREAM_NOTIFICATION_ID
+                if (manager.activeNotifications.none { it.tag == stream.id && it.id == notificationId }) continue
+                manager.notify(stream.id, notificationId, liveStream(applicationContext, stream, avatar))
+            }
+        }
     }
+
 
     fun postTest(context: Context) {
         val notification = Notification.Builder(context, LIVE_CHANNEL_ID)

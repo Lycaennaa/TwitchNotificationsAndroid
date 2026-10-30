@@ -23,9 +23,20 @@ internal data class TwitchStream(
     val userName: String,
     val title: String,
     val gameName: String,
+    val profileImageUrl: String? = null,
 ) {
     val displayName: String
         get() = userName.ifBlank { userLogin }
+}
+
+
+internal fun attachProfileImages(
+    streams: List<TwitchStream>,
+    profileImagesByUserId: Map<String, String>,
+): List<TwitchStream> = streams.map { stream ->
+    profileImagesByUserId[stream.userId]?.let { imageUrl ->
+        stream.copy(profileImageUrl = imageUrl)
+    } ?: stream
 }
 
 internal class TwitchApiException(
@@ -130,6 +141,39 @@ internal class TwitchApiClient {
             TwitchApiException.Kind.TOO_MANY_STREAMS,
             "The followed-stream list is larger than the supported limit.",
         )
+    }
+
+    fun profileImageUrls(
+        session: TwitchSession,
+        userIds: Collection<String>,
+    ): Map<String, String> {
+        val uniqueUserIds = userIds.filter(String::isNotBlank).distinct()
+        if (uniqueUserIds.isEmpty()) return emptyMap()
+
+        val profileImagesByUserId = HashMap<String, String>()
+        for (userIdBatch in uniqueUserIds.chunked(PAGE_SIZE)) {
+            val uri = Uri.parse("https://api.twitch.tv/helix/users")
+                .buildUpon()
+                .apply { userIdBatch.forEach { appendQueryParameter("id", it) } }
+                .build()
+            val response = getJson(
+                uri.toString(),
+                mapOf(
+                    "Authorization" to "Bearer ${session.accessToken}",
+                    "Client-ID" to session.clientId,
+                ),
+            )
+            val users = response.optJSONArray("data") ?: continue
+            for (index in 0 until users.length()) {
+                val user = users.optJSONObject(index) ?: continue
+                val userId = user.optString("id")
+                val profileImageUrl = user.optString("profile_image_url")
+                if (userId.isNotBlank() && profileImageUrl.isNotBlank()) {
+                    profileImagesByUserId[userId] = profileImageUrl
+                }
+            }
+        }
+        return profileImagesByUserId
     }
 
     private fun getJson(url: String, headers: Map<String, String>): JSONObject {

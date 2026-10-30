@@ -145,6 +145,11 @@ class TwitchMonitorService : Service() {
                                 deliver(stream)
                             }
                             if (stopping) return
+                            TwitchNotifications.postLiveStreams(
+                                this,
+                                outcome.newlyLiveStreams,
+                                outcome.session,
+                            )
                             monitorPoller.commit(outcome)
 
                             val status = if (outcome.streamCount == 0) {
@@ -201,7 +206,6 @@ class TwitchMonitorService : Service() {
                 Toast.makeText(this, "${stream.displayName} is live", Toast.LENGTH_LONG).show()
             }
         }
-        TwitchNotifications.postLiveStream(this, stream)
     }
 
     private fun updateStatus(status: String) {

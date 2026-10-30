@@ -128,10 +128,12 @@ internal class TwitchFallbackWorker(
                             !monitoringRequested(preferences) ||
                             !poller.isCurrentSession(outcome.session)
                         ) return Result.success()
-                        for (stream in outcome.newlyLiveStreams) {
-                            if (!monitoringRequested(preferences)) return Result.success()
-                            TwitchNotifications.postLiveStream(applicationContext, stream)
-                        }
+                        if (!monitoringRequested(preferences)) return Result.success()
+                        TwitchNotifications.postLiveStreams(
+                            applicationContext,
+                            outcome.newlyLiveStreams,
+                            outcome.session,
+                        )
                         if (monitoringRequested(preferences)) {
                             poller.commit(outcome)
                             updateStatus(preferences, TwitchAppState.STATUS_BACKGROUND_FALLBACK)
