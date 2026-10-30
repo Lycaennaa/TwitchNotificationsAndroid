@@ -17,7 +17,7 @@ android {
     defaultConfig {
         applicationId = "com.lycaennaa.twitchalerts"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 34
         versionCode = 2
         versionName = "1.0.1"
     }
@@ -52,5 +52,6 @@ kotlin {
     }
 }
 dependencies {
+    implementation("androidx.work:work-runtime:2.10.0")
     testImplementation("junit:junit:4.13.2")
 }

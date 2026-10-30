@@ -20,6 +20,7 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Switch
 import android.widget.Toast
 import java.util.concurrent.Executors
 
@@ -104,6 +105,35 @@ class MainActivity : Activity() {
             topMargin = 8,
         )
 
+        val bootPreferences = getSharedPreferences(TwitchAppState.PREFERENCES_NAME, MODE_PRIVATE)
+        val autoStartOnBootSwitch = Switch(this).apply {
+            text = "Start monitoring after device restart"
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            isChecked = bootPreferences.getBoolean(TwitchAppState.KEY_AUTO_START_ON_BOOT, false)
+            setOnCheckedChangeListener { _, enabled ->
+                bootPreferences.edit()
+                    .putBoolean(TwitchAppState.KEY_AUTO_START_ON_BOOT, enabled)
+                    .apply()
+            }
+        }
+        content.addView(
+            autoStartOnBootSwitch,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply {
+                topMargin = dp(12)
+            },
+        )
+        addText(
+            content,
+            "Starts only if monitoring was active before restart; it cannot override Android background limits.",
+            13f,
+            Color.LTGRAY,
+            topMargin = 4,
+        )
+
         addButton(content, "Send test notification", topMargin = 22) {
             requireNotificationPermission {
                 TwitchNotifications.createChannels(this)
@@ -169,7 +199,27 @@ class MainActivity : Activity() {
         super.onResume()
         refreshTokenState()
         val preferences = getSharedPreferences(TwitchAppState.PREFERENCES_NAME, MODE_PRIVATE)
-        showStatus(preferences.getString(TwitchAppState.KEY_STATUS, null) ?: "Monitoring is stopped.")
+        val status = preferences.getString(TwitchAppState.KEY_STATUS, null)
+        showStatus(status ?: "Monitoring is stopped.")
+        resumeMonitoringIfNeeded()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        resumeMonitoringIfNeeded()
+    }
+
+    private fun resumeMonitoringIfNeeded() {
+        val preferences = getSharedPreferences(TwitchAppState.PREFERENCES_NAME, MODE_PRIVATE)
+        if (
+            TwitchAppState.shouldResumeAfterTimeout(
+                monitoringRequested = preferences.getBoolean(TwitchAppState.KEY_MONITORING_REQUESTED, false),
+                resumeAfterTimeout = preferences.getBoolean(TwitchAppState.KEY_RESUME_AFTER_TIMEOUT, false),
+            )
+        ) {
+            startMonitoringService()
+        }
     }
 
     override fun onStop() {
@@ -251,6 +301,8 @@ class MainActivity : Activity() {
 
     private fun startMonitoringService() {
         val preferences = getSharedPreferences(TwitchAppState.PREFERENCES_NAME, MODE_PRIVATE)
+        val resumeAfterTimeout =
+            preferences.getBoolean(TwitchAppState.KEY_RESUME_AFTER_TIMEOUT, false)
         preferences.edit()
             .putBoolean(TwitchAppState.KEY_MONITORING_REQUESTED, true)
             .putString(TwitchAppState.KEY_STATUS, "Starting Twitch monitoring…")
@@ -266,7 +318,7 @@ class MainActivity : Activity() {
         } catch (exception: Exception) {
             val message = "Android could not start background monitoring. Keep the app open and try again."
             preferences.edit()
-                .putBoolean(TwitchAppState.KEY_MONITORING_REQUESTED, false)
+                .putBoolean(TwitchAppState.KEY_MONITORING_REQUESTED, resumeAfterTimeout)
                 .putString(TwitchAppState.KEY_STATUS, message)
                 .apply()
             showStatus(message)
@@ -277,8 +329,11 @@ class MainActivity : Activity() {
         val message = "Stopping Twitch monitoring…"
         getSharedPreferences(TwitchAppState.PREFERENCES_NAME, MODE_PRIVATE).edit()
             .putBoolean(TwitchAppState.KEY_MONITORING_REQUESTED, false)
-            .putString(TwitchAppState.KEY_STATUS, message)
+            .putBoolean(TwitchAppState.KEY_RESUME_AFTER_TIMEOUT, false)
             .apply()
+        TwitchMonitoringWork.cancelFallback(this)
+        TwitchMonitoringWork.cancelResumeReminder(this)
+        TwitchNotifications.cancelResumeReminder(this)
         showStatus(message)
         try {
             startService(

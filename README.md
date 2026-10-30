@@ -13,9 +13,12 @@ Go-live events post a native Android notification whether the app is open or in 
 
 ## Background behavior
 
-Monitoring uses a user-started foreground service so it can continue polling after the activity is closed. It waits about 60 seconds after each completed poll; network time and Android scheduling mean this is best-effort, not an exact one-minute guarantee. The ongoing notification is required by Android for this service. Force-stopping the app stops monitoring, and monitoring must be started again after a device restart.
+Monitoring uses a user-started foreground service so it can continue polling after the activity is closed. It waits about 60 seconds after each completed poll; network time and Android scheduling mean this is best-effort, not an exact one-minute guarantee. The ongoing notification is required. Enable **Start monitoring after device restart** to attempt resuming after a normal reboot, but only if monitoring was still requested. A force-stop or device restrictions may prevent automatic start; open the app to start again.
 
-Android 15 limits `dataSync` foreground services to six hours total in a 24-hour period. If that limit is reached, Android stops monitoring; reopen the app and start it again when Android allows it. Android's WorkManager periodic scheduling has a 15-minute minimum interval and can run later, so it cannot provide the requested one-minute cadence.
+This sideload build targets API 34 (Android 14). Android 15 and later apply the six-hour `dataSync` timeout to apps targeting API 35 or higher, so API 34 avoids that specific timeout.
+A WorkManager watchdog runs while monitoring is requested. It skips checks while the foreground-service heartbeat is fresh and polls Twitch if it goes stale. Checks are best-effort at 15-minute intervals or later; Android may defer them, and short streams may be missed.
+After a timeout or stale heartbeat, a separate reminder asks you to reopen the app; Android may defer it. Opening the app requests one-minute monitoring again. This still does not guarantee 24/7 operation because Android or device vendors can stop services.
+Google Play requires API 36 for new apps and updates as of August 31, 2026. This API 34 build is sideload-only.
 
 ## Build
 

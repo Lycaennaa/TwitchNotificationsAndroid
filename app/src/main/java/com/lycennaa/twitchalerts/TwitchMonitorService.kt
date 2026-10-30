@@ -8,7 +8,6 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.Handler
 import android.widget.Toast
-import java.util.LinkedHashSet
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
@@ -18,13 +17,33 @@ internal object TwitchAppState {
     const val PREFERENCES_NAME = "twitch_monitor_state"
     const val KEY_STATUS = "status"
     const val KEY_MONITORING_REQUESTED = "monitoring_requested"
+    const val KEY_AUTO_START_ON_BOOT = "auto_start_on_boot"
+    const val KEY_RESUME_AFTER_TIMEOUT = "resume_after_timeout"
+    const val KEY_LAST_SERVICE_HEARTBEAT_MILLIS = "last_service_heartbeat_millis"
+    const val STATUS_BACKGROUND_FALLBACK =
+        "One-minute monitoring paused. Background checks run about every 15 minutes; open the app to resume faster checks."
+
     const val KEY_BASELINE_INITIALIZED = "baseline_initialized"
     const val KEY_BASELINE_USER_ID = "baseline_user_id"
     const val KEY_LIVE_STREAM_IDS = "live_stream_ids"
+
+    fun shouldResumeAfterTimeout(monitoringRequested: Boolean, resumeAfterTimeout: Boolean) =
+        monitoringRequested && resumeAfterTimeout
+
+    fun shouldStartMonitoringOnBoot(autoStartEnabled: Boolean, monitoringRequested: Boolean) =
+        autoStartEnabled && monitoringRequested
+
+    fun shouldRunBackgroundFallback(
+        monitoringRequested: Boolean,
+        lastHeartbeatMillis: Long,
+        nowMillis: Long,
+        staleAfterMillis: Long,
+    ) = monitoringRequested &&
+        (lastHeartbeatMillis <= 0L || nowMillis - lastHeartbeatMillis >= staleAfterMillis)
 }
 
 class TwitchMonitorService : Service() {
-    private val apiClient = TwitchApiClient()
+    private val monitorPoller by lazy { TwitchMonitorPoller(this) }
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var pollExecutor: ScheduledExecutorService
     private var pollTask: ScheduledFuture<*>? = null
@@ -78,7 +97,12 @@ class TwitchMonitorService : Service() {
         stopping = false
         preferences.edit()
             .putBoolean(TwitchAppState.KEY_MONITORING_REQUESTED, true)
+            .putBoolean(TwitchAppState.KEY_RESUME_AFTER_TIMEOUT, false)
+            .putLong(TwitchAppState.KEY_LAST_SERVICE_HEARTBEAT_MILLIS, System.currentTimeMillis())
             .apply()
+        TwitchMonitoringWork.scheduleFallback(this)
+        TwitchMonitoringWork.cancelResumeReminder(this)
+        TwitchNotifications.cancelResumeReminder(this)
         if (pollTask?.isDone != false) {
             pollTask = pollExecutor.scheduleWithFixedDelay(
                 ::pollSafely,
@@ -91,65 +115,83 @@ class TwitchMonitorService : Service() {
     }
 
     private fun pollSafely() {
-        if (stopping) return
-        if (!TwitchNotifications.notificationsAllowed(this)) {
-            finishMonitoring("Notifications are disabled. Enable them to resume Twitch monitoring.")
-            return
-        }
-
+        if (stopping || !TwitchMonitorPollGuard.tryAcquire()) return
         try {
-            val token = TokenVault(this).read()
-            if (token.isNullOrBlank()) {
-                finishMonitoring("No saved OAuth token. Enter a token to start monitoring.")
+            statePreferences().edit()
+                .putLong(TwitchAppState.KEY_LAST_SERVICE_HEARTBEAT_MILLIS, System.currentTimeMillis())
+                .apply()
+            if (!TwitchNotifications.notificationsAllowed(this)) {
+                finishMonitoring("Notifications are disabled. Enable notifications to resume Twitch monitoring.")
                 return
             }
-            val activeSession = session?.takeIf { it.accessToken == token }
-                ?: apiClient.authenticate(token).also { session = it }
-            val currentStreams = apiClient.followedStreams(activeSession)
-            if (stopping) return
 
-            val preferences = statePreferences()
-            val baselineMatchesAccount =
-                preferences.getBoolean(TwitchAppState.KEY_BASELINE_INITIALIZED, false) &&
-                    preferences.getString(TwitchAppState.KEY_BASELINE_USER_ID, null) == activeSession.userId
-            val previousIds: Set<String>? = if (baselineMatchesAccount) {
-                preferences.getStringSet(TwitchAppState.KEY_LIVE_STREAM_IDS, emptySet<String>())
-                    ?.toSet() ?: emptySet()
-            } else {
-                null
-            }
-            val newlyLive = TwitchNotificationState.newlyLiveStreams(currentStreams, previousIds)
-            for (stream in newlyLive) {
-                if (stopping) return
-                deliver(stream)
-            }
+            try {
+                when (val outcome = monitorPoller.poll(session)) {
+                    is TwitchMonitorPollOutcome.Stop -> {
+                        TwitchAccountStateGuard.acquire()
+                        try {
+                            if (monitorPoller.isCurrentPollToken()) finishMonitoring(outcome.status)
+                        } finally {
+                            TwitchAccountStateGuard.release()
+                        }
+                    }
+                    is TwitchMonitorPollOutcome.Success -> {
+                        TwitchAccountStateGuard.acquire()
+                        try {
+                            if (stopping || !monitorPoller.isCurrentSession(outcome.session)) return
+                            session = outcome.session
+                            for (stream in outcome.newlyLiveStreams) {
+                                if (stopping) return
+                                deliver(stream)
+                            }
+                            if (stopping) return
+                            monitorPoller.commit(outcome)
 
-            val currentIds = currentStreams.mapTo(LinkedHashSet()) { it.id }
-            preferences.edit()
-                .putBoolean(TwitchAppState.KEY_BASELINE_INITIALIZED, true)
-                .putString(TwitchAppState.KEY_BASELINE_USER_ID, activeSession.userId)
-                .putStringSet(TwitchAppState.KEY_LIVE_STREAM_IDS, currentIds)
-                .apply()
-
-            val status = if (currentStreams.isEmpty()) {
-                "Monitoring every minute. No followed channels are live."
-            } else {
-                "Monitoring every minute. ${currentStreams.size} followed channel(s) are live."
+                            val status = if (outcome.streamCount == 0) {
+                                "Monitoring every minute. No followed channels are live."
+                            } else {
+                                "Monitoring every minute. ${outcome.streamCount} followed channel(s) are live."
+                            }
+                            updateStatus(status)
+                        } finally {
+                            TwitchAccountStateGuard.release()
+                        }
+                    }
+                }
+            } catch (exception: TwitchApiException) {
+                TwitchAccountStateGuard.acquire()
+                try {
+                    if (!monitorPoller.isCurrentPollToken()) return
+                    when (exception.kind) {
+                        TwitchApiException.Kind.INVALID_TOKEN ->
+                            finishMonitoring("OAuth token is invalid or expired. Replace it to resume.")
+                        TwitchApiException.Kind.MISSING_SCOPE ->
+                            finishMonitoring("OAuth token needs the user:read:follows scope.")
+                        else ->
+                            updateStatus("${exception.message ?: "Twitch request failed."} Retrying in about one minute.")
+                    }
+                } finally {
+                    TwitchAccountStateGuard.release()
+                }
+            } catch (exception: TokenVaultException) {
+                TwitchAccountStateGuard.acquire()
+                try {
+                    if (!monitorPoller.isCurrentPollToken()) return
+                    finishMonitoring(exception.message ?: "The saved token could not be read. Enter it again.")
+                } finally {
+                    TwitchAccountStateGuard.release()
+                }
+            } catch (exception: Exception) {
+                TwitchAccountStateGuard.acquire()
+                try {
+                    if (!monitorPoller.isCurrentPollToken()) return
+                    updateStatus("Unexpected error while checking Twitch. Retrying in about one minute.")
+                } finally {
+                    TwitchAccountStateGuard.release()
+                }
             }
-            updateStatus(status)
-        } catch (exception: TwitchApiException) {
-            when (exception.kind) {
-                TwitchApiException.Kind.INVALID_TOKEN ->
-                    finishMonitoring("OAuth token is invalid or expired. Replace it to resume.")
-                TwitchApiException.Kind.MISSING_SCOPE ->
-                    finishMonitoring("OAuth token needs the user:read:follows scope.")
-                else ->
-                    updateStatus("${exception.message ?: "Twitch request failed."} Retrying in about one minute.")
-            }
-        } catch (exception: TokenVaultException) {
-            finishMonitoring(exception.message ?: "The saved token could not be read. Enter it again.")
-        } catch (exception: Exception) {
-            updateStatus("Unexpected error while checking Twitch. Retrying in about one minute.")
+        } finally {
+            TwitchMonitorPollGuard.release()
         }
     }
 
@@ -177,14 +219,15 @@ class TwitchMonitorService : Service() {
         }
     }
 
-    private fun finishMonitoring(status: String) {
+    private fun finishMonitoring(status: String, resumeAfterTimeout: Boolean = false) {
         if (stopping) return
         stopping = true
         pollTask?.cancel(true)
         pollTask = null
         session = null
         statePreferences().edit()
-            .putBoolean(TwitchAppState.KEY_MONITORING_REQUESTED, false)
+            .putBoolean(TwitchAppState.KEY_MONITORING_REQUESTED, resumeAfterTimeout)
+            .putBoolean(TwitchAppState.KEY_RESUME_AFTER_TIMEOUT, resumeAfterTimeout)
             .putString(TwitchAppState.KEY_STATUS, status)
             .apply()
         sendBroadcast(
@@ -196,6 +239,9 @@ class TwitchMonitorService : Service() {
             stopForeground(STOP_FOREGROUND_REMOVE)
             foregroundStarted = false
         }
+        if (!resumeAfterTimeout) TwitchMonitoringWork.cancelFallback(this)
+        TwitchMonitoringWork.cancelResumeReminder(this)
+        TwitchNotifications.cancelResumeReminder(this)
         stopSelf()
     }
 
@@ -204,8 +250,11 @@ class TwitchMonitorService : Service() {
 
     override fun onTimeout(startId: Int, fgsType: Int) {
         finishMonitoring(
-            "Android stopped monitoring after its foreground-service time limit. Open the app to resume.",
+            TwitchAppState.STATUS_BACKGROUND_FALLBACK,
+            resumeAfterTimeout = true,
         )
+        TwitchMonitoringWork.scheduleFallback(this)
+        TwitchMonitoringWork.scheduleResumeReminder(this)
     }
 
     override fun onDestroy() {

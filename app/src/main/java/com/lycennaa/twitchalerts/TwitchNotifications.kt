@@ -15,6 +15,7 @@ internal object TwitchNotifications {
     const val LIVE_CHANNEL_ID = "twitch_live_alerts"
     const val MONITORING_NOTIFICATION_ID = 4100
     private const val TEST_NOTIFICATION_ID = 4101
+    const val RESUME_REMINDER_NOTIFICATION_ID = 4102
 
     fun createChannels(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -98,6 +99,27 @@ internal object TwitchNotifications {
         context.getSystemService(NotificationManager::class.java)
             .notify(TEST_NOTIFICATION_ID, notification)
     }
+
+    fun postResumeReminder(context: Context): Boolean {
+        if (!notificationsAllowed(context)) return false
+        createChannels(context)
+        val notification = Notification.Builder(context, MONITORING_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_twitch_notification)
+            .setContentTitle("Resume Twitch monitoring")
+            .setContentText("Open the app to resume faster checks. Background checks may be delayed.")
+            .setContentIntent(openAppIntent(context))
+            .setAutoCancel(true)
+            .setCategory(Notification.CATEGORY_REMINDER)
+            .build()
+        context.getSystemService(NotificationManager::class.java)
+            .notify(RESUME_REMINDER_NOTIFICATION_ID, notification)
+        return true
+    }
+    fun cancelResumeReminder(context: Context) {
+        context.getSystemService(NotificationManager::class.java)
+            .cancel(RESUME_REMINDER_NOTIFICATION_ID)
+    }
+
 
     private fun openAppIntent(context: Context): PendingIntent = PendingIntent.getActivity(
         context,

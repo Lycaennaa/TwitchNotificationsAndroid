@@ -11,6 +11,15 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import java.util.concurrent.locks.ReentrantLock
+
+internal object TwitchAccountStateGuard {
+    private val lock = ReentrantLock()
+
+    fun acquire() = lock.lock()
+
+    fun release() = lock.unlock()
+}
 
 internal class TokenVault(context: Context) {
     private val preferences = context.applicationContext.getSharedPreferences(
@@ -21,19 +30,24 @@ internal class TokenVault(context: Context) {
     @Throws(TokenVaultException::class)
     fun save(token: String) {
         if (token.isBlank()) throw TokenVaultException("Enter a Twitch OAuth token.")
+        TwitchAccountStateGuard.acquire()
         try {
-            val cipher = Cipher.getInstance(TRANSFORMATION)
-            cipher.init(Cipher.ENCRYPT_MODE, secretKey())
-            val encrypted = cipher.doFinal(token.toByteArray(StandardCharsets.UTF_8))
-            val packed = cipher.iv + encrypted
-            val stored = Base64.encodeToString(packed, Base64.NO_WRAP)
-            if (!preferences.edit().putString(KEY_CIPHERTEXT, stored).commit()) {
-                throw TokenVaultException("Could not save the encrypted Twitch token.")
+            try {
+                val cipher = Cipher.getInstance(TRANSFORMATION)
+                cipher.init(Cipher.ENCRYPT_MODE, secretKey())
+                val encrypted = cipher.doFinal(token.toByteArray(StandardCharsets.UTF_8))
+                val packed = cipher.iv + encrypted
+                val stored = Base64.encodeToString(packed, Base64.NO_WRAP)
+                if (!preferences.edit().putString(KEY_CIPHERTEXT, stored).commit()) {
+                    throw TokenVaultException("Could not save the encrypted Twitch token.")
+                }
+            } catch (exception: TokenVaultException) {
+                throw exception
+            } catch (exception: Exception) {
+                throw TokenVaultException("Could not encrypt the Twitch token.", exception)
             }
-        } catch (exception: TokenVaultException) {
-            throw exception
-        } catch (exception: Exception) {
-            throw TokenVaultException("Could not encrypt the Twitch token.", exception)
+        } finally {
+            TwitchAccountStateGuard.release()
         }
     }
 
@@ -61,10 +75,15 @@ internal class TokenVault(context: Context) {
     @Throws(TokenVaultException::class)
     fun clear() {
         try {
-            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-            if (keyStore.containsAlias(KEY_ALIAS)) keyStore.deleteEntry(KEY_ALIAS)
-            if (!preferences.edit().remove(KEY_CIPHERTEXT).commit()) {
-                throw TokenVaultException("Could not remove the saved Twitch token.")
+            TwitchAccountStateGuard.acquire()
+            try {
+                val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+                if (keyStore.containsAlias(KEY_ALIAS)) keyStore.deleteEntry(KEY_ALIAS)
+                if (!preferences.edit().remove(KEY_CIPHERTEXT).commit()) {
+                    throw TokenVaultException("Could not remove the saved Twitch token.")
+                }
+            } finally {
+                TwitchAccountStateGuard.release()
             }
         } catch (exception: TokenVaultException) {
             throw exception
