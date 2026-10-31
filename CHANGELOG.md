@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Emit debug and release APKs with app name, version, and build type, without Gradle's default APK names.
 
 ## 1.0.2
 

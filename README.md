@@ -38,6 +38,6 @@ Build the signed release APK:
 ./gradlew :app:assembleRelease
 ```
 
-The APKs are written to `app/build/outputs/apk/debug/app-debug.apk` and `app/build/outputs/apk/release/app-release.apk`.
+After assembly, each variant directory contains only its named APK (plus Gradle's `output-metadata.json`): `app/build/outputs/apk/<variant>/<App Name> - <Version> - <DEBUG/RELEASE>.apk` (for example, `app/build/outputs/apk/debug/Twitch Live Alerts - 1.0.2 - DEBUG.apk`). Gradle's default APK is removed, and the metadata is updated to point to the named APK.
 
 Release signing uses `signing.properties` and `app/signing/twitch-alerts-upload.p12`. Both are excluded from version control; back them up securely because losing the keystore prevents signing updates for this app.
