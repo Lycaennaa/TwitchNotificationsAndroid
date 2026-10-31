@@ -88,7 +88,10 @@ internal object TwitchNotifications {
             .setContentIntent(openAppIntent(context))
             .setAutoCancel(true)
             .setCategory(Notification.CATEGORY_SOCIAL)
-        if (largeIcon != null) builder.setLargeIcon(largeIcon)
+        if (largeIcon != null) {
+            TwitchStatusBarIcon.fromAvatar(context, largeIcon)?.let(builder::setSmallIcon)
+            builder.setLargeIcon(largeIcon)
+        }
         if (stream.gameName.isNotBlank()) builder.setSubText(stream.gameName)
         return builder.build()
     }
