@@ -1,4 +1,4 @@
-# Uses distill for Cargo when available; otherwise invoke Gradle directly.
+# Uses distill for Gradle when available; otherwise invokes Gradle directly.
 # https://github.com/lycaennaa/distill
 
 

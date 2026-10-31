@@ -18,6 +18,3 @@ The APK is written to `app/build/outputs/apk/debug/Twitch Live Alerts - 1.0.2 - 
 - [Development](DEVELOPMENT.md) · [Support](SUPPORT.md) · [Full documentation index](DOCUMENTATION.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md) · [Changelog](CHANGELOG.md)
 
-## AI use
-
-OpenAI Codex assisted with repository research, source review, and drafting this documentation update. The model and reasoning level were not available in the session context.
