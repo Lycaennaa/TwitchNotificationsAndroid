@@ -14,11 +14,17 @@ import java.util.concurrent.Executors
 
 internal object TwitchNotifications {
     const val MONITORING_CHANNEL_ID = "twitch_monitoring"
-    const val LIVE_CHANNEL_ID = "twitch_live_alerts"
+    private const val LEGACY_LIVE_CHANNEL_ID = "twitch_live_alerts"
+    private const val TEST_CHANNEL_ID = "twitch_test_alerts"
     const val MONITORING_NOTIFICATION_ID = 4100
     private const val TEST_NOTIFICATION_ID = 4101
     const val RESUME_REMINDER_NOTIFICATION_ID = 4102
     private const val LIVE_STREAM_NOTIFICATION_ID = 5_000
+    private const val DISABLED_STREAMER_IDS_KEY = "disabled_streamer_notification_ids"
+    private const val EXTRA_LIVE_STREAM_ID = "twitch_live_stream_id"
+
+    private val streamerNotificationLock = Any()
+    private val latestLiveStreamIds = HashMap<String, String>()
 
     private val avatarExecutor = Executors.newSingleThreadExecutor { task ->
         Thread(task, "twitch-notification-avatar").apply { isDaemon = true }
@@ -39,14 +45,73 @@ internal object TwitchNotifications {
         )
         manager.createNotificationChannel(
             NotificationChannel(
-                LIVE_CHANNEL_ID,
-                "Twitch go-live alerts",
+                TEST_CHANNEL_ID,
+                "Twitch test alerts",
                 NotificationManager.IMPORTANCE_HIGH,
             ).apply {
-                description = "Alerts when a followed Twitch channel starts streaming."
+                description = "One-time test notifications."
+            },
+        )
+        manager.deleteNotificationChannel(LEGACY_LIVE_CHANNEL_ID)
+    }
+    fun createStreamerChannels(context: Context, channels: List<TwitchFollowedChannel>) {
+        channels.forEach { channel ->
+            createStreamerChannel(context, channel.userId, channel.displayName, channel.userLogin)
+        }
+    }
+
+    private fun createStreamerChannel(
+        context: Context,
+        userId: String,
+        displayName: String,
+        userLogin: String,
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || userId.isBlank()) return
+        val channelName = if (userLogin.isBlank()) displayName else "$displayName (@$userLogin)"
+        context.getSystemService(NotificationManager::class.java).createNotificationChannel(
+            NotificationChannel(
+                streamerChannelId(userId),
+                channelName,
+                NotificationManager.IMPORTANCE_HIGH,
+            ).apply {
+                description = "Go-live alerts for @$userLogin."
             },
         )
     }
+
+    fun isStreamerEnabled(context: Context, userId: String): Boolean {
+        val disabledIds = context.getSharedPreferences(
+            TwitchAppState.PREFERENCES_NAME,
+            Context.MODE_PRIVATE,
+        ).getStringSet(DISABLED_STREAMER_IDS_KEY, emptySet()).orEmpty()
+        return TwitchNotificationState.shouldNotifyStreamer(userId, disabledIds)
+    }
+
+    fun setStreamerEnabled(context: Context, userId: String, enabled: Boolean) {
+        synchronized(streamerNotificationLock) {
+            val preferences = context.getSharedPreferences(
+                TwitchAppState.PREFERENCES_NAME,
+                Context.MODE_PRIVATE,
+            )
+            val disabledIds = preferences
+                .getStringSet(DISABLED_STREAMER_IDS_KEY, emptySet())
+                .orEmpty()
+                .toMutableSet()
+            if (enabled) disabledIds.remove(userId) else disabledIds.add(userId)
+            preferences.edit().putStringSet(DISABLED_STREAMER_IDS_KEY, disabledIds).apply()
+                if (!enabled) latestLiveStreamIds.remove(userId)
+            if (!enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val manager = context.getSystemService(NotificationManager::class.java)
+                manager.cancel(userId, LIVE_STREAM_NOTIFICATION_ID)
+                val channelId = streamerChannelId(userId)
+                manager.activeNotifications
+                    .filter { it.notification.channelId == channelId }
+                    .forEach { manager.cancel(it.tag, it.id) }
+            }
+        }
+    }
+
+    private fun streamerChannelId(userId: String) = "twitch_streamer_$userId"
 
     fun notificationsAllowed(context: Context): Boolean {
         val runtimePermissionGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
@@ -55,7 +120,6 @@ internal object TwitchNotifications {
         return runtimePermissionGranted &&
             context.getSystemService(NotificationManager::class.java).areNotificationsEnabled()
     }
-
     fun monitoring(context: Context, status: String): Notification {
         val stopIntent = PendingIntent.getService(
             context,
@@ -81,7 +145,7 @@ internal object TwitchNotifications {
         stream: TwitchStream,
         largeIcon: Bitmap? = null,
     ): Notification {
-        val builder = Notification.Builder(context, LIVE_CHANNEL_ID)
+        val builder = Notification.Builder(context, streamerChannelId(stream.userId))
             .setSmallIcon(R.drawable.ic_twitch_notification)
             .setContentTitle("${stream.displayName} is live")
             .setContentText(stream.title.ifBlank { "Started streaming on Twitch." })
@@ -93,36 +157,92 @@ internal object TwitchNotifications {
             builder.setLargeIcon(largeIcon)
         }
         if (stream.gameName.isNotBlank()) builder.setSubText(stream.gameName)
-        return builder.build()
+        return builder.build().apply {
+            extras.putString(EXTRA_LIVE_STREAM_ID, stream.id)
+        }
     }
 
     fun postLiveStreams(context: Context, streams: List<TwitchStream>, session: TwitchSession) {
         if (streams.isEmpty()) return
         val applicationContext = context.applicationContext
         val manager = applicationContext.getSystemService(NotificationManager::class.java)
-        for (stream in streams) {
-            manager.notify(stream.id, LIVE_STREAM_NOTIFICATION_ID, liveStream(applicationContext, stream))
+        streams.forEach { ensureStreamerChannel(applicationContext, it) }
+        val enabledStreams = streams.filter { isStreamerEnabled(applicationContext, it.userId) }
+        if (enabledStreams.isEmpty()) return
+        for (stream in enabledStreams) {
+            postLiveStreamIfEnabled(applicationContext, manager, stream)
         }
 
         avatarExecutor.execute {
             val profileImagesByUserId = try {
-                TwitchApiClient().profileImageUrls(session, streams.map { it.userId })
+                TwitchApiClient().profileImageUrls(session, enabledStreams.map { it.userId })
             } catch (_: TwitchApiException) {
+                for (stream in enabledStreams) clearLatestLiveStreamId(stream)
                 return@execute
             }
-            val streamsWithProfileImages = attachProfileImages(streams, profileImagesByUserId)
+            val streamsWithProfileImages = attachProfileImages(enabledStreams, profileImagesByUserId)
             for (stream in streamsWithProfileImages) {
-                val avatar = TwitchAvatarLoader.load(stream.profileImageUrl) ?: continue
-                val notificationId = LIVE_STREAM_NOTIFICATION_ID
-                if (manager.activeNotifications.none { it.tag == stream.id && it.id == notificationId }) continue
-                manager.notify(stream.id, notificationId, liveStream(applicationContext, stream, avatar))
+                try {
+                    if (isStreamerEnabled(applicationContext, stream.userId)) {
+                        val avatar = TwitchAvatarLoader.load(stream.profileImageUrl)
+                        if (avatar != null) {
+                            postLiveStreamIfEnabled(
+                                applicationContext,
+                                manager,
+                                stream,
+                                avatar,
+                                onlyIfActive = true,
+                            )
+                        }
+                    }
+                } finally {
+                    clearLatestLiveStreamId(stream)
+                }
+            }
+        }
+    }
+
+    private fun ensureStreamerChannel(context: Context, stream: TwitchStream) {
+        createStreamerChannel(context, stream.userId, stream.displayName, stream.userLogin)
+    }
+
+    private fun postLiveStreamIfEnabled(
+        context: Context,
+        manager: NotificationManager,
+        stream: TwitchStream,
+        largeIcon: Bitmap? = null,
+        onlyIfActive: Boolean = false,
+    ) {
+        synchronized(streamerNotificationLock) {
+            if (!isStreamerEnabled(context, stream.userId)) return
+            val notificationId = LIVE_STREAM_NOTIFICATION_ID
+            if (onlyIfActive &&
+                manager.activeNotifications.none {
+                    it.tag == stream.userId &&
+                        it.id == notificationId &&
+                        TwitchNotificationState.isNotificationForStream(
+                            it.notification.extras.getString(EXTRA_LIVE_STREAM_ID),
+                    latestLiveStreamIds[stream.userId],
+                            stream.id,
+                        )
+                }
+            ) return
+            if (!onlyIfActive) latestLiveStreamIds[stream.userId] = stream.id
+            manager.notify(stream.userId, notificationId, liveStream(context, stream, largeIcon))
+        }
+    }
+    private fun clearLatestLiveStreamId(stream: TwitchStream) {
+        synchronized(streamerNotificationLock) {
+            if (latestLiveStreamIds[stream.userId] == stream.id) {
+                latestLiveStreamIds.remove(stream.userId)
             }
         }
     }
 
 
+
     fun postTest(context: Context) {
-        val notification = Notification.Builder(context, LIVE_CHANNEL_ID)
+        val notification = Notification.Builder(context, TEST_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_twitch_notification)
             .setContentTitle("Twitch notification test")
             .setContentText("Test notifications are working.")

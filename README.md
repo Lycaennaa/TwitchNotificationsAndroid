@@ -6,12 +6,12 @@ A small Kotlin Android app for Twitch followed-channel go-live alerts. It uses a
 
 1. Install and open the app.
 2. Paste a user access token with `user:read:follows`, then tap **Save token & start monitoring**. The token is encrypted with Android Keystore and is not displayed again after saving.
-3. Allow notifications when Android asks. The app creates a low-priority ongoing notification while monitoring and a separate alert notification channel for streams going live.
+3. Allow notifications when Android asks. The app creates a low-priority ongoing notification while monitoring and a separate high-importance channel for each followed streamer. Refresh the in-app streamer list to enable or disable each streamer's alerts; Android settings can further control each streamer's channel.
 4. Tap **Stop monitoring** to stop polling, or **Forget token** to stop and erase the saved token.
 
-Go-live events post a native Android notification whether the app is open or in the background; when the app is open, they also show a Toast. Streams already live on the first successful poll are treated as the initial baseline and do not trigger alerts.
+Go-live events for enabled streamers post a native Android notification whether the app is open or in the background; when the app is open, they also show a Toast. Streams already live on the first successful poll are treated as the initial baseline and do not trigger alerts.
 
-Go-live notifications use Android's high-importance channel and attach the streamer's Twitch profile image when available. Heads-up and lock-screen presentation remain subject to Android and user settings; these one-way alerts are not Android conversation or bubble notifications.
+Each streamer has a separate high-importance Android notification channel. Go-live notifications attach the streamer's Twitch profile image when available. Heads-up and lock-screen presentation remain subject to Android and user settings; these one-way alerts are not Android conversation or bubble notifications.
 
 ## Background behavior
 

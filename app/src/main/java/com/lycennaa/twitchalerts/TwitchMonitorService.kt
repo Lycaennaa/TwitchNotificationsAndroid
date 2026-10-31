@@ -201,8 +201,10 @@ class TwitchMonitorService : Service() {
     }
 
     private fun deliver(stream: TwitchStream) {
+        if (!TwitchNotifications.isStreamerEnabled(this, stream.userId)) return
         if (AppVisibility.isActivityVisible) {
             mainHandler.post {
+                if (!TwitchNotifications.isStreamerEnabled(this, stream.userId)) return@post
                 Toast.makeText(this, "${stream.displayName} is live", Toast.LENGTH_LONG).show()
             }
         }

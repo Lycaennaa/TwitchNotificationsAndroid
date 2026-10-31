@@ -1,6 +1,8 @@
 package com.lycaennaa.twitchalerts
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TwitchNotificationStateTest {
@@ -38,6 +40,29 @@ class TwitchNotificationStateTest {
 
         assertEquals(listOf(stream), afterOfflinePoll)
     }
+    @Test
+    fun disablingOneStreamerLeavesOtherStreamerNotificationsEnabled() {
+        val disabledStreamerIds = setOf("user-1")
+        assertFalse(TwitchNotificationState.shouldNotifyStreamer("user-1", disabledStreamerIds))
+        assertTrue(TwitchNotificationState.shouldNotifyStreamer("user-2", disabledStreamerIds))
+    }
+    @Test
+    fun avatarUpdateOnlyAppliesToItsOwnStreamNotification() {
+        assertTrue(
+            TwitchNotificationState.isNotificationForStream("stream-1", "stream-1", "stream-1"),
+        )
+        assertFalse(
+            TwitchNotificationState.isNotificationForStream("stream-1", "stream-2", "stream-1"),
+        )
+        assertFalse(
+            TwitchNotificationState.isNotificationForStream(null, "stream-1", "stream-1"),
+        )
+        assertFalse(
+            TwitchNotificationState.isNotificationForStream("stream-1", null, "stream-1"),
+        )
+    }
+
+
 
     private fun stream(id: String) = TwitchStream(
         id = id,

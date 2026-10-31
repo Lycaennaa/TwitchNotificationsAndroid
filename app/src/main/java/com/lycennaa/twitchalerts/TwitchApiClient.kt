@@ -28,6 +28,15 @@ internal data class TwitchStream(
     val displayName: String
         get() = userName.ifBlank { userLogin }
 }
+internal data class TwitchFollowedChannel(
+    val userId: String,
+    val userLogin: String,
+    val userName: String,
+) {
+    val displayName: String
+        get() = userName.ifBlank { userLogin }
+}
+
 
 
 internal fun attachProfileImages(
@@ -51,7 +60,7 @@ internal class TwitchApiException(
         RATE_LIMITED,
         SERVER,
         INVALID_RESPONSE,
-        TOO_MANY_STREAMS,
+        TOO_MANY_FOLLOWED_ITEMS,
     }
 }
 
@@ -88,19 +97,52 @@ internal class TwitchApiClient {
         return TwitchSession(token, clientId, userId)
     }
 
-    fun followedStreams(session: TwitchSession): List<TwitchStream> {
-        val streams = LinkedHashMap<String, TwitchStream>()
+    fun followedStreams(session: TwitchSession): List<TwitchStream> =
+        followedItems(session, "streams", "stream") { item, streams ->
+            val stream = TwitchStream(
+                id = item.optString("id"),
+                userId = item.optString("user_id"),
+                userLogin = item.optString("user_login"),
+                userName = item.optString("user_name"),
+                title = item.optString("title"),
+                gameName = item.optString("game_name"),
+            )
+            if (stream.id.isBlank() || stream.userId.isBlank()) {
+                throw invalidResponse("Twitch returned an incomplete followed-stream entry.")
+            }
+            streams.putIfAbsent(stream.id, stream)
+        }
+
+    fun followedChannels(session: TwitchSession): List<TwitchFollowedChannel> =
+        followedItems(session, "channels", "channel") { item, channels ->
+            val channel = TwitchFollowedChannel(
+                userId = item.optString("broadcaster_id"),
+                userLogin = item.optString("broadcaster_login"),
+                userName = item.optString("broadcaster_name"),
+            )
+            if (channel.userId.isBlank()) {
+                throw invalidResponse("Twitch returned an incomplete followed-channel entry.")
+            }
+            channels.putIfAbsent(channel.userId, channel)
+        }
+
+    private inline fun <T> followedItems(
+        session: TwitchSession,
+        endpoint: String,
+        itemType: String,
+        addItem: (JSONObject, LinkedHashMap<String, T>) -> Unit,
+    ): List<T> {
+        val items = LinkedHashMap<String, T>()
         val seenCursors = HashSet<String>()
         var cursor: String? = null
 
         repeat(MAXIMUM_PAGES) {
-            val uri = Uri.parse("https://api.twitch.tv/helix/streams/followed")
+            val uri = Uri.parse("https://api.twitch.tv/helix/$endpoint/followed")
                 .buildUpon()
                 .appendQueryParameter("user_id", session.userId)
                 .appendQueryParameter("first", PAGE_SIZE.toString())
                 .apply { cursor?.let { appendQueryParameter("after", it) } }
                 .build()
-
             val page = getJson(
                 uri.toString(),
                 mapOf(
@@ -109,28 +151,17 @@ internal class TwitchApiClient {
                 ),
             )
             val data = page.optJSONArray("data")
-                ?: throw invalidResponse("Twitch returned an invalid followed-stream list.")
+                ?: throw invalidResponse("Twitch returned an invalid followed-$itemType list.")
             for (index in 0 until data.length()) {
                 val item = data.optJSONObject(index)
-                    ?: throw invalidResponse("Twitch returned an invalid followed-stream entry.")
-                val stream = TwitchStream(
-                    id = item.optString("id"),
-                    userId = item.optString("user_id"),
-                    userLogin = item.optString("user_login"),
-                    userName = item.optString("user_name"),
-                    title = item.optString("title"),
-                    gameName = item.optString("game_name"),
-                )
-                if (stream.id.isBlank() || stream.userId.isBlank()) {
-                    throw invalidResponse("Twitch returned an incomplete followed-stream entry.")
-                }
-                streams.putIfAbsent(stream.id, stream)
+                    ?: throw invalidResponse("Twitch returned an invalid followed-$itemType entry.")
+                addItem(item, items)
             }
 
             val nextCursor = page.optJSONObject("pagination")
                 ?.optString("cursor")
                 ?.takeIf(String::isNotBlank)
-            if (nextCursor == null) return streams.values.toList()
+            if (nextCursor == null) return items.values.toList()
             if (!seenCursors.add(nextCursor)) {
                 throw invalidResponse("Twitch returned a repeated pagination cursor.")
             }
@@ -138,8 +169,8 @@ internal class TwitchApiClient {
         }
 
         throw TwitchApiException(
-            TwitchApiException.Kind.TOO_MANY_STREAMS,
-            "The followed-stream list is larger than the supported limit.",
+            TwitchApiException.Kind.TOO_MANY_FOLLOWED_ITEMS,
+            "The followed-$itemType list is larger than the supported limit.",
         )
     }
 

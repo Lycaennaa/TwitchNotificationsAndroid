@@ -14,23 +14,35 @@ import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
+import android.view.MotionEvent
+import android.view.ViewGroup
 import android.view.WindowInsets
 import android.widget.Button
+import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Switch
+import android.widget.ListView
 import android.widget.Toast
 import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
     private val apiClient = TwitchApiClient()
     private val backgroundExecutor = Executors.newSingleThreadExecutor()
+    private val streamerLoadExecutor = Executors.newSingleThreadExecutor()
     private lateinit var tokenVault: TokenVault
     private lateinit var tokenInput: EditText
     private lateinit var tokenStateLabel: TextView
     private lateinit var statusLabel: TextView
+    private lateinit var streamerAlertStatusLabel: TextView
+    private lateinit var streamerAlertList: ListView
+    @Volatile
+    private var streamerLoadGeneration = 0
+    private lateinit var streamerChannelAdapter: ArrayAdapter<TwitchFollowedChannel>
+    private var activeStreamerLoadId: Int? = null
+    private var streamerLoadRequestedAgain = false
     private var pendingPermissionAction: (() -> Unit)? = null
     private var receiverRegistered = false
 
@@ -133,6 +145,55 @@ class MainActivity : Activity() {
             Color.LTGRAY,
             topMargin = 4,
         )
+        addText(content, "Streamer alerts", 18f, Color.WHITE, bold = true, topMargin = 22)
+        streamerAlertStatusLabel = addText(
+            content,
+            "Load followed streamers to choose which alerts are allowed.",
+            13f,
+            Color.LTGRAY,
+            topMargin = 6,
+        )
+        addButton(content, "Refresh followed streamers", topMargin = 8) {
+            loadFollowedChannels()
+        }
+        streamerChannelAdapter = object : ArrayAdapter<TwitchFollowedChannel>(this, 0) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val channel = getItem(position) ?: return convertView ?: Switch(this@MainActivity)
+                val toggle = (convertView as? Switch) ?: Switch(this@MainActivity)
+                toggle.setOnCheckedChangeListener(null)
+                toggle.text = if (channel.userLogin.isBlank()) {
+                    channel.displayName
+                } else {
+                    "${channel.displayName} (@${channel.userLogin})"
+                }
+                toggle.setTextColor(Color.WHITE)
+                toggle.textSize = 14f
+                toggle.isChecked = TwitchNotifications.isStreamerEnabled(this@MainActivity, channel.userId)
+                toggle.setOnCheckedChangeListener { _, enabled ->
+                    TwitchNotifications.setStreamerEnabled(this@MainActivity, channel.userId, enabled)
+                }
+                return toggle
+            }
+        }
+        streamerAlertList = ListView(this).apply {
+            adapter = streamerChannelAdapter
+            setOnTouchListener { view, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE ->
+                        view.parent?.requestDisallowInterceptTouchEvent(true)
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                        view.parent?.requestDisallowInterceptTouchEvent(false)
+                }
+                false
+            }
+        }
+        content.addView(
+            streamerAlertList,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(360),
+            ).apply { topMargin = dp(4) },
+        )
 
         addButton(content, "Send test notification", topMargin = 22) {
             requireNotificationPermission {
@@ -180,6 +241,7 @@ class MainActivity : Activity() {
         }
         setContentView(scroll)
         scroll.requestApplyInsets()
+        loadFollowedChannels()
     }
 
     override fun onStart() {
@@ -232,7 +294,9 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        streamerLoadRequestedAgain = false
         backgroundExecutor.shutdownNow()
+        streamerLoadExecutor.shutdownNow()
         super.onDestroy()
     }
 
@@ -269,6 +333,7 @@ class MainActivity : Activity() {
                         tokenInput.text?.clear()
                         refreshTokenState()
                         startMonitoringService()
+                        loadFollowedChannels()
                     }
                 } catch (exception: Exception) {
                     val message = when (exception) {
@@ -350,6 +415,7 @@ class MainActivity : Activity() {
         try {
             tokenVault.clear()
             refreshTokenState()
+            loadFollowedChannels()
             showStatus("Saved OAuth token removed.")
         } catch (exception: TokenVaultException) {
             showStatus(exception.message ?: "Could not remove the saved token.")
@@ -382,6 +448,88 @@ class MainActivity : Activity() {
     private fun showStatus(status: String) {
         statusLabel.text = status
     }
+    private fun loadFollowedChannels() {
+        val requestId = ++streamerLoadGeneration
+        val token = try {
+            tokenVault.read()
+        } catch (_: TokenVaultException) {
+            streamerLoadRequestedAgain = false
+            streamerChannelAdapter.clear()
+            streamerAlertStatusLabel.text = "Saved token unavailable. Enter it again to manage alerts."
+            return
+        }
+        if (token.isNullOrBlank()) {
+            streamerLoadRequestedAgain = false
+            streamerChannelAdapter.clear()
+            streamerAlertStatusLabel.text = "Save an OAuth token to manage streamer alerts."
+            return
+        }
+        if (activeStreamerLoadId != null) {
+            streamerLoadRequestedAgain = true
+            streamerAlertStatusLabel.text = "Refreshing followed streamers…"
+            return
+        }
+
+        activeStreamerLoadId = requestId
+        streamerAlertStatusLabel.text = "Loading followed streamers…"
+        streamerLoadExecutor.execute {
+            try {
+                val session = apiClient.authenticate(token)
+                val channels = apiClient.followedChannels(session)
+                if (requestId == streamerLoadGeneration && tokenVault.read() == token) {
+                    TwitchNotifications.createStreamerChannels(applicationContext, channels)
+                }
+                runOnUiThread {
+                    if (isCurrentStreamerLoad(requestId, token)) {
+                        streamerChannelAdapter.setNotifyOnChange(false)
+                        streamerChannelAdapter.clear()
+                        streamerChannelAdapter.addAll(channels)
+                        streamerChannelAdapter.notifyDataSetChanged()
+                        streamerAlertStatusLabel.text = if (channels.isEmpty()) {
+                            "No followed streamers found."
+                        } else {
+                            "${channels.size} followed streamer(s). Alerts are on unless switched off here."
+                        }
+                    }
+                    finishStreamerLoad(requestId)
+                }
+            } catch (exception: Exception) {
+                val message = when (exception) {
+                    is TwitchApiException -> exception.message
+                    else -> "Could not load followed streamers."
+                } ?: "Could not load followed streamers."
+                runOnUiThread {
+                    if (isCurrentStreamerLoad(requestId, token)) {
+                        streamerAlertStatusLabel.text = message
+                    }
+                    finishStreamerLoad(requestId)
+                }
+            }
+        }
+    }
+
+    private fun isCurrentStreamerLoad(requestId: Int, token: String): Boolean {
+        if (requestId != streamerLoadGeneration || isFinishing || isDestroyed) return false
+        return try {
+            tokenVault.read() == token
+        } catch (_: TokenVaultException) {
+            false
+        }
+    }
+
+    private fun finishStreamerLoad(requestId: Int) {
+        if (activeStreamerLoadId != requestId) return
+        activeStreamerLoadId = null
+        if (isFinishing || isDestroyed) {
+            streamerLoadRequestedAgain = false
+            return
+        }
+        if (streamerLoadRequestedAgain) {
+            streamerLoadRequestedAgain = false
+            loadFollowedChannels()
+        }
+    }
+
 
     private fun addText(
         parent: LinearLayout,
