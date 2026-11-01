@@ -26,6 +26,7 @@ import android.widget.TextView
 import android.widget.Switch
 import android.widget.ListView
 import android.widget.Toast
+import androidx.core.content.ContextCompat
 import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
@@ -248,12 +249,12 @@ class MainActivity : Activity() {
         super.onStart()
         AppVisibility.isActivityVisible = true
         val filter = IntentFilter(TwitchMonitorService.ACTION_STATUS)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("DEPRECATION")
-            registerReceiver(statusReceiver, filter)
-        }
+        ContextCompat.registerReceiver(
+            this,
+            statusReceiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
         receiverRegistered = true
     }
 

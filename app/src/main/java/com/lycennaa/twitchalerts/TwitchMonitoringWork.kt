@@ -109,41 +109,41 @@ internal class TwitchFallbackWorker(
             }
 
         if (!monitoringRequested(preferences)) return Result.success()
-            return when (outcome) {
-                is TwitchMonitorPollOutcome.Stop -> {
-                    TwitchAccountStateGuard.acquire()
-                    try {
-                        if (poller.isCurrentPollToken()) {
-                            stopFallback(preferences, outcome.status)
-                        }
-                    } finally {
-                        TwitchAccountStateGuard.release()
+        return when (outcome) {
+            is TwitchMonitorPollOutcome.Stop -> {
+                TwitchAccountStateGuard.acquire()
+                try {
+                    if (poller.isCurrentPollToken()) {
+                        stopFallback(preferences, outcome.status)
                     }
-                    Result.success()
+                } finally {
+                    TwitchAccountStateGuard.release()
                 }
-                is TwitchMonitorPollOutcome.Success -> {
-                    TwitchAccountStateGuard.acquire()
-                    try {
-                        if (
-                            !monitoringRequested(preferences) ||
-                            !poller.isCurrentSession(outcome.session)
-                        ) return Result.success()
-                        if (!monitoringRequested(preferences)) return Result.success()
-                        TwitchNotifications.postLiveStreams(
-                            applicationContext,
-                            outcome.newlyLiveStreams,
-                            outcome.session,
-                        )
-                        if (monitoringRequested(preferences)) {
-                            poller.commit(outcome)
-                            updateStatus(preferences, TwitchAppState.STATUS_BACKGROUND_FALLBACK)
-                        }
-                    } finally {
-                        TwitchAccountStateGuard.release()
-                    }
-                    Result.success()
-                }
+                Result.success()
             }
+            is TwitchMonitorPollOutcome.Success -> {
+                TwitchAccountStateGuard.acquire()
+                try {
+                    if (
+                        !monitoringRequested(preferences) ||
+                        !poller.isCurrentSession(outcome.session)
+                    ) return Result.success()
+                    if (!monitoringRequested(preferences)) return Result.success()
+                    TwitchNotifications.postLiveStreams(
+                        applicationContext,
+                        outcome.newlyLiveStreams,
+                        outcome.session,
+                    )
+                    if (monitoringRequested(preferences)) {
+                        poller.commit(outcome)
+                        updateStatus(preferences, TwitchAppState.STATUS_BACKGROUND_FALLBACK)
+                    }
+                } finally {
+                    TwitchAccountStateGuard.release()
+                }
+                Result.success()
+            }
+        }
         } finally {
             TwitchMonitorPollGuard.release()
         }

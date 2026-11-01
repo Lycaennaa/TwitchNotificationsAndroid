@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Keep the dark navigation-bar theme API-safe and mark monitor-status broadcasts as not exported.
 - Emit debug and release APKs with app name, version, and build type, without Gradle's default APK names.
 
 ## 1.0.2
