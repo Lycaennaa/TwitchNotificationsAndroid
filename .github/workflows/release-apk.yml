@@ -1,0 +1,215 @@
+name: Android CI and Release
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and verify a signed APK from master without publishing a release
+        required: false
+        type: boolean
+        default: false
+permissions:
+  contents: read
+
+concurrency:
+  group: release-apk-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    if: ${{ !(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) && !(github.event_name == 'workflow_dispatch' && inputs.dry_run && github.ref == 'refs/heads/master') }}
+    name: Run CI checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Java 17
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+
+      - name: Install Android 36 SDK packages
+        run: sdkmanager --install 'platforms;android-36' 'build-tools;36.0.0'
+
+      - name: Run unit tests and debug lint
+        run: ./gradlew --no-daemon :app:testDebugUnitTest :app:lintDebug
+
+  build-release:
+    if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.dry_run && github.ref == 'refs/heads/master') }}
+    name: Build and verify signed APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Java 17
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+
+      - name: Install Android 36 SDK packages
+        run: sdkmanager --install 'platforms;android-36' 'build-tools;36.0.0'
+
+      - name: Configure release signing
+        env:
+          ANDROID_SIGNING_KEYSTORE_BASE64: ${{ secrets.ANDROID_SIGNING_KEYSTORE_BASE64 }}
+          ANDROID_SIGNING_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_SIGNING_KEYSTORE_PASSWORD }}
+          ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_SIGNING_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          : "${ANDROID_SIGNING_KEYSTORE_BASE64:?Missing repository secret ANDROID_SIGNING_KEYSTORE_BASE64}"
+          : "${ANDROID_SIGNING_KEYSTORE_PASSWORD:?Missing repository secret ANDROID_SIGNING_KEYSTORE_PASSWORD}"
+          : "${ANDROID_SIGNING_KEY_ALIAS:?Missing repository secret ANDROID_SIGNING_KEY_ALIAS}"
+          if [[ -e signing.properties ]]; then
+            echo "Refusing to overwrite existing signing.properties" >&2
+            exit 1
+          fi
+
+          keystore="$RUNNER_TEMP/android-signing-keystore.p12"
+          properties="$RUNNER_TEMP/android-signing.properties"
+          printf '%s' "$ANDROID_SIGNING_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          test -s "$keystore"
+          export ANDROID_SIGNING_KEYSTORE_FILE="$keystore"
+          export ANDROID_SIGNING_PROPERTIES_FILE="$properties"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          def escape(value):
+              result = []
+              for index, char in enumerate(value):
+                  code = ord(char)
+                  if char == "\\":
+                      result.append("\\\\")
+                  elif char == "\t":
+                      result.append("\\t")
+                  elif char == "\n":
+                      result.append("\\n")
+                  elif char == "\r":
+                      result.append("\\r")
+                  elif char == "\f":
+                      result.append("\\f")
+                  elif char == " " and index == 0:
+                      result.append("\\ ")
+                  elif 0x20 <= code <= 0x7E:
+                      result.append(char)
+                  elif code <= 0xFFFF:
+                      result.append(f"\\u{code:04x}")
+                  else:
+                      code -= 0x10000
+                      result.append(f"\\u{0xD800 + (code >> 10):04x}")
+                      result.append(f"\\u{0xDC00 + (code & 0x3FF):04x}")
+              return "".join(result)
+
+          properties = {
+              "keyAlias": os.environ["ANDROID_SIGNING_KEY_ALIAS"],
+              "keyPassword": os.environ["ANDROID_SIGNING_KEYSTORE_PASSWORD"],
+              "storeFile": os.environ["ANDROID_SIGNING_KEYSTORE_FILE"],
+              "storePassword": os.environ["ANDROID_SIGNING_KEYSTORE_PASSWORD"],
+          }
+          Path(os.environ["ANDROID_SIGNING_PROPERTIES_FILE"]).write_text(
+              "".join(f"{key}={escape(value)}\n" for key, value in properties.items()),
+              encoding="ascii",
+          )
+          PY
+          touch "$RUNNER_TEMP/android-signing-created"
+          mv "$properties" signing.properties
+
+      - name: Run unit tests and build signed release APK
+        run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleRelease
+
+      - name: Verify APK signature
+        id: apk
+        run: |
+          apk="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          test -n "$apk"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            apk_version="$(python3 -c 'import json; print(json.load(open("app/build/outputs/apk/release/output-metadata.json"))["elements"][0]["versionName"])')"
+            tag_version="${GITHUB_REF_NAME#v}"
+            if [[ "$tag_version" != "$apk_version" ]]; then
+              printf 'Release tag %s does not match APK versionName %s\n' "$GITHUB_REF_NAME" "$apk_version" >&2
+              exit 1
+            fi
+          fi
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify "$apk"
+          printf 'path=%s\n' "$apk" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK for release publishing
+        if: ${{ github.event_name == 'push' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed-release-apk
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Remove temporary signing material
+        if: always()
+        run: |
+          if [[ -f "$RUNNER_TEMP/android-signing-created" ]]; then
+            rm -f signing.properties
+          fi
+          rm -f \
+            "$RUNNER_TEMP/android-signing-keystore.p12" \
+            "$RUNNER_TEMP/android-signing.properties" \
+            "$RUNNER_TEMP/android-signing-created"
+
+  publish:
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    needs: build-release
+    name: Attest and publish GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    steps:
+      - name: Download signed APK
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed-release-apk
+          path: dist
+
+      - name: Locate release APK
+        id: apk
+        run: |
+          apk="$(find dist -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          test -n "$apk"
+          printf 'path=%s\n' "$apk" >> "$GITHUB_OUTPUT"
+
+      - name: Attest release APK provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        with:
+          subject-path: ${{ steps.apk.outputs.path }}
+
+      - name: Create GitHub Release
+        env:
+          APK_PATH: ${{ steps.apk.outputs.path }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "$APK_PATH" --verify-tag --generate-notes

@@ -42,3 +42,52 @@ just ci
 Gradle generates APKs and build metadata under `app/build/`. Do not edit generated APKs or `output-metadata.json` by hand. The Gradle build script names APK outputs; update that source configuration if output naming changes.
 
 See [Contributing](CONTRIBUTING.md) for review and pull-request workflow.
+
+## CI Android signing and releases
+
+GitHub Actions runs unit tests and debug lint on pull requests and pushes to `master`. Push a `v*` tag to build, attest, and publish a signed release. The tag must match the APK's `versionName` after removing the leading `v` (for example, `v1.0.2` for `1.0.2`). To test signing without publishing, manually dispatch the workflow from `master` with `dry_run` enabled; it builds and verifies the APK signature but skips attestation, release creation, and artifact upload.
+
+Configure these repository Actions secrets:
+
+- `ANDROID_SIGNING_KEYSTORE_BASE64` (base64-encoded keystore)
+- `ANDROID_SIGNING_KEYSTORE_PASSWORD` (used for the store and key)
+- `ANDROID_SIGNING_KEY_ALIAS`
+
+For a first release, create a PKCS12 keystore outside the repository:
+
+```sh
+mkdir -p "$HOME/keystores"
+keytool -genkeypair -v \
+  -keystore "$HOME/keystores/android-release.p12" \
+  -storetype PKCS12 \
+  -alias android-release \
+  -keyalg RSA -keysize 2048 -validity 10000 \
+  -dname "CN=Android App Signing"
+```
+
+
+At the key password prompt, press Return to reuse the keystore password. This workflow uses that same password for both signing fields.
+
+To convert an existing JKS without changing its signing identity, set `-srcalias` to that keystore's current alias. Replace `YOUR_EXISTING_JKS_ALIAS` below with it; `-destalias` can use the generic `android-release` alias.
+
+```sh
+keytool -importkeystore \
+  -srckeystore "$HOME/keystores/android-release.jks" \
+  -srcstoretype JKS \
+  -destkeystore "$HOME/keystores/android-release.p12" \
+  -deststoretype PKCS12 \
+  -srcalias YOUR_EXISTING_JKS_ALIAS \
+  -destalias android-release
+```
+
+On macOS, copy the base64-encoded keystore to the clipboard for the `ANDROID_SIGNING_KEYSTORE_BASE64` secret with:
+
+```sh
+base64 -i "$HOME/keystores/android-release.p12" | tr -d '\n' | pbcopy
+```
+
+Set `ANDROID_SIGNING_KEY_ALIAS` to `android-release`. With PKCS12, use the same password for the store and key; the workflow uses `ANDROID_SIGNING_KEYSTORE_PASSWORD` for both. For local signing, point `signing.properties` at the `.p12` file and set its `storePassword` and `keyPassword` to that same value. Never commit the keystore or `signing.properties`.
+
+Repository secrets are repository-scoped. You can share the same key across repos by configuring the same secrets in each (or using organization secrets where available), but this shares signing identity and compromise risk. Prefer per-app keys unless a shared signing identity is intentional. Keep secure backups of the keystore and passwords.
+
+The release job verifies the APK signature, attaches it to a GitHub Release with generated notes, and records a GitHub build-provenance attestation, verifiable with `gh attestation verify`. Temporary signing files are removed at job completion.

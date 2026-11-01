@@ -42,6 +42,7 @@ android {
                 keyPassword = signingProperties.getProperty("keyPassword")
                 storeFile = rootProject.file(signingProperties.getProperty("storeFile"))
                 storePassword = signingProperties.getProperty("storePassword")
+                storeType = "PKCS12"
             }
         }
     }
