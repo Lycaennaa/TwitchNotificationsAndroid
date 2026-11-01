@@ -1,19 +1,80 @@
 name: Android Release
 
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without the leading v
+        required: true
+        type: string
+      dry_run:
+        description: Build and verify without creating a tag or publishing
+        required: false
+        type: boolean
+        default: true
+
 permissions:
   contents: read
 
 concurrency:
-  group: release-apk-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: release-apk-${{ inputs.version || github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  validate-release:
+    name: Validate release request and CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      sha: ${{ steps.release.outputs.sha }}
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - name: Validate branch, version, and CI
+        id: release
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]]; then
+            printf 'Run this workflow from the default branch (%s).\n' "$DEFAULT_BRANCH" >&2
+            exit 1
+          fi
+
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'Expected version MAJOR.MINOR.PATCH without a leading v; got %s\n' "$RELEASE_VERSION" >&2
+            exit 1
+          fi
+
+          default_branch_sha="$(gh api "repos/${GITHUB_REPOSITORY}/branches/${DEFAULT_BRANCH}" --jq .commit.sha)"
+          if [[ "$default_branch_sha" != "$GITHUB_SHA" ]]; then
+            printf 'Workflow commit %s is not the current default-branch head %s\n' "$GITHUB_SHA" "$default_branch_sha" >&2
+            exit 1
+          fi
+
+          if [[ "$DRY_RUN" != "true" ]]; then
+            successful_ci="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&branch=${DEFAULT_BRANCH}&status=completed&per_page=100" --jq '[.workflow_runs[] | select(.conclusion == "success" and .event == "push")] | length')"
+            if [[ "$successful_ci" -lt 1 ]]; then
+              printf 'A successful CI run for %s at %s is required before release\n' "$DEFAULT_BRANCH" "$GITHUB_SHA" >&2
+              exit 1
+            fi
+            tag="v${RELEASE_VERSION}"
+            existing_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha 2>/dev/null || true)"
+            if [[ -n "$existing_sha" && "$existing_sha" != "$GITHUB_SHA" ]]; then
+              printf 'Release tag %s already points to %s, not %s\n' "$tag" "$existing_sha" "$GITHUB_SHA" >&2
+              exit 1
+            fi
+          fi
+
+          printf 'sha=%s\nversion=%s\ntag=v%s\n' "$GITHUB_SHA" "$RELEASE_VERSION" "$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
   build-release:
-    if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master') }}
+    needs: validate-release
     name: Build and verify signed APK
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -23,6 +84,7 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.validate-release.outputs.sha }}
           persist-credentials: false
 
       - name: Set up Java 17
@@ -106,24 +168,23 @@ jobs:
       - name: Run unit tests and build signed release APK
         run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleRelease
 
-      - name: Verify APK signature
+      - name: Verify APK version and signature
         id: apk
+        env:
+          RELEASE_VERSION: ${{ needs.validate-release.outputs.version }}
         run: |
           apk="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print -quit)"
           test -n "$apk"
-          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
-            apk_version="$(python3 -c 'import json; print(json.load(open("app/build/outputs/apk/release/output-metadata.json"))["elements"][0]["versionName"])')"
-            tag_version="${GITHUB_REF_NAME#v}"
-            if [[ "$tag_version" != "$apk_version" ]]; then
-              printf 'Release tag %s does not match APK versionName %s\n' "$GITHUB_REF_NAME" "$apk_version" >&2
-              exit 1
-            fi
+          apk_version="$(python3 -c 'import json; print(json.load(open("app/build/outputs/apk/release/output-metadata.json"))["elements"][0]["versionName"])')"
+          if [[ "$RELEASE_VERSION" != "$apk_version" ]]; then
+            printf 'Requested version %s does not match APK versionName %s\n' "$RELEASE_VERSION" "$apk_version" >&2
+            exit 1
           fi
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify "$apk"
           printf 'path=%s\n' "$apk" >> "$GITHUB_OUTPUT"
 
       - name: Upload APK for release publishing
-        if: ${{ github.event_name == 'push' }}
+        if: ${{ inputs.dry_run == false }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: signed-release-apk
@@ -143,15 +204,43 @@ jobs:
             "$RUNNER_TEMP/android-signing.properties" \
             "$RUNNER_TEMP/android-signing-created"
 
-  publish:
-    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
-    needs: build-release
-    name: Attest and publish GitHub Release
+  create-tag:
+    if: ${{ inputs.dry_run == false }}
+    needs: [validate-release, build-release]
+    name: Create release tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Create or verify release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ needs.validate-release.outputs.sha }}
+          RELEASE_TAG: ${{ needs.validate-release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          existing_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}" --jq .sha 2>/dev/null || true)"
+          if [[ -n "$existing_sha" ]]; then
+            if [[ "$existing_sha" != "$RELEASE_SHA" ]]; then
+              printf 'Release tag %s already points to %s, not %s\n' "$RELEASE_TAG" "$existing_sha" "$RELEASE_SHA" >&2
+              exit 1
+            fi
+          else
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f "ref=refs/tags/${RELEASE_TAG}" \
+              -f "sha=${RELEASE_SHA}" >/dev/null
+          fi
+
+  attest:
+    if: ${{ inputs.dry_run == false }}
+    needs: [validate-release, build-release, create-tag]
+    name: Attest signed APK
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       attestations: write
-      contents: write
+      contents: read
       id-token: write
     steps:
       - name: Download signed APK
@@ -172,8 +261,31 @@ jobs:
         with:
           subject-path: ${{ steps.apk.outputs.path }}
 
+  publish:
+    if: ${{ inputs.dry_run == false }}
+    needs: [validate-release, build-release, create-tag, attest]
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download signed APK
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed-release-apk
+          path: dist
+
+      - name: Locate release APK
+        id: apk
+        run: |
+          apk="$(find dist -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          test -n "$apk"
+          printf 'path=%s\n' "$apk" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         env:
           APK_PATH: ${{ steps.apk.outputs.path }}
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" "$APK_PATH" --verify-tag --generate-notes
+          RELEASE_TAG: ${{ needs.validate-release.outputs.tag }}
+        run: gh release create "$RELEASE_TAG" "$APK_PATH" --verify-tag --generate-notes --repo "$GITHUB_REPOSITORY"

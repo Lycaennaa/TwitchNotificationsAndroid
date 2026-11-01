@@ -45,7 +45,7 @@ See [Contributing](CONTRIBUTING.md) for review and pull-request workflow.
 
 ## CI Android signing and releases
 
-`.github/workflows/ci.yml` runs unit tests and debug lint on pull requests and pushes to `master`. The separate `.github/workflows/release-apk.yml` builds and verifies a signed APK when manually dispatched from `master` without publishing, or builds, attests, and publishes on a `v*` tag. The tag must match the APK's `versionName` after removing the leading `v` (for example, `v1.0.2` for `1.0.2`).
+`.github/workflows/ci.yml` runs unit tests and debug lint on pushes to `master` and pull requests to `master`. To test signing without publishing, manually dispatch `.github/workflows/release-apk.yml` from the default branch with `version` set to the app's `versionName` without the leading `v` (for example, `1.0.2`) and leave `dry_run` enabled (the default). This builds and verifies a signed APK without creating a tag, uploading an artifact, or publishing. To release, disable `dry_run`: the workflow requires successful CI on the same default-branch commit, confirms the APK version, creates `v<version>`, attests the APK, and publishes a GitHub Release. Do not push release tags directly.
 
 Configure these repository Actions secrets:
 
@@ -90,4 +90,4 @@ Set `ANDROID_SIGNING_KEY_ALIAS` to `android-release`. With PKCS12, use the same 
 
 Repository secrets are repository-scoped. You can share the same key across repos by configuring the same secrets in each (or using organization secrets where available), but this shares signing identity and compromise risk. Prefer per-app keys unless a shared signing identity is intentional. Keep secure backups of the keystore and passwords.
 
-On a tag-triggered run, the release workflow verifies the APK signature, transfers it to the publish job as a one-day workflow artifact, attaches it to a GitHub Release with generated notes, and records a GitHub build-provenance attestation, verifiable with `gh attestation verify`. Temporary signing files are removed at job completion.
+For a non-dry-run dispatch, the release workflow creates the `v<version>` tag after the APK version and signature checks pass, then attests that exact APK and attaches it to the GitHub Release with generated notes. Verify provenance with `gh attestation verify`. Temporary signing files are removed at build-job completion.
