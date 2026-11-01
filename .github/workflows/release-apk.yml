@@ -65,7 +65,9 @@ jobs:
               exit 1
             fi
             tag="v${RELEASE_VERSION}"
-            existing_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha 2>/dev/null || true)"
+            if ! existing_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq '.sha // empty' 2>/dev/null)"; then
+              existing_sha=""
+            fi
             if [[ -n "$existing_sha" && "$existing_sha" != "$GITHUB_SHA" ]]; then
               printf 'Release tag %s already points to %s, not %s\n' "$tag" "$existing_sha" "$GITHUB_SHA" >&2
               exit 1
@@ -220,7 +222,9 @@ jobs:
           RELEASE_TAG: ${{ needs.validate-release.outputs.tag }}
         run: |
           set -euo pipefail
-          existing_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}" --jq .sha 2>/dev/null || true)"
+          if ! existing_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}" --jq '.sha // empty' 2>/dev/null)"; then
+            existing_sha=""
+          fi
           if [[ -n "$existing_sha" ]]; then
             if [[ "$existing_sha" != "$RELEASE_SHA" ]]; then
               printf 'Release tag %s already points to %s, not %s\n' "$RELEASE_TAG" "$existing_sha" "$RELEASE_SHA" >&2
