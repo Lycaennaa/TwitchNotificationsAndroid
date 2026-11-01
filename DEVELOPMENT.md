@@ -45,7 +45,7 @@ See [Contributing](CONTRIBUTING.md) for review and pull-request workflow.
 
 ## CI Android signing and releases
 
-GitHub Actions runs unit tests and debug lint on pull requests and pushes to `master`. Push a `v*` tag to build, attest, and publish a signed release. The tag must match the APK's `versionName` after removing the leading `v` (for example, `v1.0.2` for `1.0.2`). To test signing without publishing, manually dispatch the workflow from `master` with `dry_run` enabled; it builds and verifies the APK signature but skips attestation, release creation, and artifact upload.
+`.github/workflows/ci.yml` runs unit tests and debug lint on pull requests and pushes to `master`. The separate `.github/workflows/release-apk.yml` builds and verifies a signed APK when manually dispatched from `master` without publishing, or builds, attests, and publishes on a `v*` tag. The tag must match the APK's `versionName` after removing the leading `v` (for example, `v1.0.2` for `1.0.2`).
 
 Configure these repository Actions secrets:
 
@@ -90,4 +90,4 @@ Set `ANDROID_SIGNING_KEY_ALIAS` to `android-release`. With PKCS12, use the same 
 
 Repository secrets are repository-scoped. You can share the same key across repos by configuring the same secrets in each (or using organization secrets where available), but this shares signing identity and compromise risk. Prefer per-app keys unless a shared signing identity is intentional. Keep secure backups of the keystore and passwords.
 
-The release job verifies the APK signature, attaches it to a GitHub Release with generated notes, and records a GitHub build-provenance attestation, verifiable with `gh attestation verify`. Temporary signing files are removed at job completion.
+On a tag-triggered run, the release workflow verifies the APK signature, transfers it to the publish job as a one-day workflow artifact, attaches it to a GitHub Release with generated notes, and records a GitHub build-provenance attestation, verifiable with `gh attestation verify`. Temporary signing files are removed at job completion.
